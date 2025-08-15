@@ -1,5 +1,6 @@
 ;; Questchain - Gamified Bounties & Task System for Communities
 ;; A smart contract-powered quest board for incentivizing community contributions
+;; Version 2.0 - Multi-Token Reward Support
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -11,11 +12,28 @@
 (define-constant err-insufficient-rewards (err u105))
 (define-constant err-already-completed (err u106))
 (define-constant err-invalid-status (err u107))
+(define-constant err-unsupported-token (err u108))
+(define-constant err-token-transfer-failed (err u109))
+
+;; Token type constants
+(define-constant token-type-stx "STX")
+(define-constant token-type-sip010 "SIP010")
 
 ;; Data Variables
 (define-data-var quest-counter uint u0)
 (define-data-var submission-counter uint u0)
 (define-data-var reputation-token-counter uint u0)
+
+;; Supported token contracts - stores trait references
+(define-map supported-tokens 
+    principal 
+    {
+        enabled: bool,
+        token-name: (string-ascii 32),
+        token-symbol: (string-ascii 10),
+        decimals: uint
+    }
+)
 
 ;; Data Maps
 (define-map quests 
@@ -26,6 +44,7 @@
         description: (string-ascii 500),
         reward-amount: uint,
         reward-token: principal,
+        token-type: (string-ascii 10),
         deadline: uint,
         max-submissions: uint,
         current-submissions: uint,
@@ -53,7 +72,11 @@
 
 (define-map quest-rewards
     uint ;; quest-id
-    uint ;; total-stx-locked
+    {
+        total-locked: uint,
+        token-contract: principal,
+        token-type: (string-ascii 10)
+    }
 )
 
 (define-map user-reputation
@@ -75,9 +98,89 @@
     }
 )
 
-;; Quest Management Functions
+;; SIP-010 Trait Definition
+(define-trait sip010-token
+    (
+        (get-name () (response (string-ascii 32) uint))
+        (get-symbol () (response (string-ascii 32) uint))
+        (get-decimals () (response uint uint))
+        (get-balance (principal) (response uint uint))
+        (set-token-uri ((optional (string-utf8 256))) (response bool uint))
+        (get-token-uri () (response (optional (string-utf8 256)) uint))
+        (transfer (uint principal principal (optional (buff 34))) (response bool uint))
+        (get-total-supply () (response uint uint))
+    )
+)
 
-(define-public (create-quest 
+;; Admin Functions for Token Management
+(define-public (add-supported-token 
+    (token-contract principal)
+    (token-name (string-ascii 32))
+    (token-symbol (string-ascii 10))
+    (decimals uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-standard token-contract) err-invalid-params)
+        (asserts! (> (len token-name) u0) err-invalid-params)
+        (asserts! (> (len token-symbol) u0) err-invalid-params)
+        (asserts! (<= decimals u18) err-invalid-params)
+        
+        (map-set supported-tokens token-contract {
+            enabled: true,
+            token-name: token-name,
+            token-symbol: token-symbol,
+            decimals: decimals
+        })
+        (ok true)
+    )
+)
+
+(define-public (toggle-token-support (token-contract principal))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-standard token-contract) err-invalid-params)
+        
+        (match (map-get? supported-tokens token-contract)
+            token-info (begin
+                (map-set supported-tokens token-contract 
+                    (merge token-info {enabled: (not (get enabled token-info))}))
+                (ok true)
+            )
+            err-not-found
+        )
+    )
+)
+
+;; Helper Functions
+(define-private (is-token-supported (token-contract principal))
+    (match (map-get? supported-tokens token-contract)
+        token-info (get enabled token-info)
+        false
+    )
+)
+
+(define-private (validate-quest-params 
+    (title (string-ascii 100))
+    (description (string-ascii 500))
+    (reward-amount uint)
+    (deadline uint)
+    (max-submissions uint))
+    (let ((current-block stacks-block-height))
+        (and
+            (> (len title) u0)
+            (> (len description) u0)
+            (> reward-amount u0)
+            (> deadline current-block)
+            (> max-submissions u0)
+            (<= max-submissions u50) ;; reasonable limit
+        )
+    )
+)
+
+;; Enhanced Quest Management Functions
+
+;; Create quest with STX rewards
+(define-public (create-stx-quest 
     (title (string-ascii 100))
     (description (string-ascii 500))
     (reward-amount uint)
@@ -87,14 +190,10 @@
     (let 
         (
             (quest-id (+ (var-get quest-counter) u1))
-            (current-block burn-block-height)
+            (current-block stacks-block-height)
         )
         ;; Validate inputs
-        (asserts! (> (len title) u0) err-invalid-params)
-        (asserts! (> (len description) u0) err-invalid-params)
-        (asserts! (> reward-amount u0) err-invalid-params)
-        (asserts! (> deadline current-block) err-invalid-params)
-        (asserts! (> max-submissions u0) err-invalid-params)
+        (asserts! (validate-quest-params title description reward-amount deadline max-submissions) err-invalid-params)
         
         ;; Lock STX rewards
         (try! (stx-transfer? reward-amount tx-sender (as-contract tx-sender)))
@@ -106,6 +205,7 @@
             description: description,
             reward-amount: reward-amount,
             reward-token: tx-sender,
+            token-type: token-type-stx,
             deadline: deadline,
             max-submissions: max-submissions,
             current-submissions: u0,
@@ -113,11 +213,74 @@
             verification-required: verification-required
         })
         
-        (map-set quest-rewards quest-id reward-amount)
-        (var-set quest-counter quest-id)
+        (map-set quest-rewards quest-id {
+            total-locked: reward-amount,
+            token-contract: tx-sender,
+            token-type: token-type-stx
+        })
         
+        (var-set quest-counter quest-id)
         (ok quest-id)
     )
+)
+
+;; Create quest with SIP-010 token rewards
+(define-public (create-token-quest
+    (title (string-ascii 100))
+    (description (string-ascii 500))
+    (reward-amount uint)
+    (deadline uint)
+    (max-submissions uint)
+    (verification-required bool)
+    (token-contract <sip010-token>))
+    (let 
+        (
+            (quest-id (+ (var-get quest-counter) u1))
+            (current-block stacks-block-height)
+            (token-principal (contract-of token-contract))
+        )
+        ;; Validate inputs
+        (asserts! (validate-quest-params title description reward-amount deadline max-submissions) err-invalid-params)
+        (asserts! (is-token-supported token-principal) err-unsupported-token)
+        
+        ;; Lock token rewards by transferring to contract
+        (try! (contract-call? token-contract transfer reward-amount tx-sender (as-contract tx-sender) none))
+        
+        ;; Create quest
+        (map-set quests quest-id {
+            creator: tx-sender,
+            title: title,
+            description: description,
+            reward-amount: reward-amount,
+            reward-token: token-principal,
+            token-type: token-type-sip010,
+            deadline: deadline,
+            max-submissions: max-submissions,
+            current-submissions: u0,
+            status: "active",
+            verification-required: verification-required
+        })
+        
+        (map-set quest-rewards quest-id {
+            total-locked: reward-amount,
+            token-contract: token-principal,
+            token-type: token-type-sip010
+        })
+        
+        (var-set quest-counter quest-id)
+        (ok quest-id)
+    )
+)
+
+;; Backward compatibility - original create-quest function defaults to STX
+(define-public (create-quest 
+    (title (string-ascii 100))
+    (description (string-ascii 500))
+    (reward-amount uint)
+    (deadline uint)
+    (max-submissions uint)
+    (verification-required bool))
+    (create-stx-quest title description reward-amount deadline max-submissions verification-required)
 )
 
 (define-public (submit-to-quest 
@@ -127,7 +290,7 @@
         (
             (quest (unwrap! (map-get? quests quest-id) err-not-found))
             (submission-id (+ (var-get submission-counter) u1))
-            (current-block burn-block-height)
+            (current-block stacks-block-height)
             (user-key {user: tx-sender, quest-id: quest-id})
         )
         ;; Validate quest and submission
@@ -223,18 +386,56 @@
     )
 )
 
-;; Reward Distribution
+;; Enhanced Reward Distribution - STX Only Version
 (define-private (distribute-reward (quest-id uint) (recipient principal))
     (let 
         (
             (quest (unwrap! (map-get? quests quest-id) err-not-found))
+            (quest-reward-info (unwrap! (map-get? quest-rewards quest-id) err-not-found))
             (reward-per-submission (/ (get reward-amount quest) (get max-submissions quest)))
+            (token-type (get token-type quest-reward-info))
         )
-        (as-contract (stx-transfer? reward-per-submission tx-sender recipient))
+        (if (is-eq token-type token-type-stx)
+            ;; Distribute STX rewards
+            (as-contract (stx-transfer? reward-per-submission tx-sender recipient))
+            ;; For SIP-010 tokens, currently not supported in this simplified version
+            ;; This would need to be implemented with specific token contracts
+            err-unsupported-token
+        )
     )
 )
 
-;; Reputation System - Updated to return proper response
+;; Separate public functions for SIP-010 reward distribution
+;; These functions allow for specific token contract implementation
+
+(define-public (distribute-sip010-reward-with-trait
+    (quest-id uint)
+    (recipient principal)
+    (token-contract <sip010-token>))
+    (let 
+        (
+            (quest (unwrap! (map-get? quests quest-id) err-not-found))
+            (quest-reward-info (unwrap! (map-get? quest-rewards quest-id) err-not-found))
+            (reward-per-submission (/ (get reward-amount quest) (get max-submissions quest)))
+            (token-principal (contract-of token-contract))
+        )
+        ;; Validate authorization (only contract or quest creator)
+        (asserts! (or 
+            (is-eq tx-sender contract-owner)
+            (is-eq tx-sender (get creator quest))
+        ) err-unauthorized)
+        
+        ;; Validate token contract matches quest
+        (asserts! (is-eq token-principal (get token-contract quest-reward-info)) err-invalid-params)
+        
+        ;; Transfer tokens
+        (as-contract 
+            (contract-call? token-contract transfer reward-per-submission tx-sender recipient none)
+        )
+    )
+)
+
+;; Reputation System
 (define-private (update-user-reputation (user principal))
     (let 
         (
@@ -260,7 +461,7 @@
     )
 )
 
-;; FIXED: Inlined NFT minting logic to avoid parameter passing issues
+;; NFT minting logic
 (define-private (mint-reputation-nft-internal (recipient principal) (quest-count uint))
     (let 
         (
@@ -277,7 +478,7 @@
             owner: recipient,
             reputation-level: reputation-level,
             quest-count: quest-count,
-            minted-at: burn-block-height
+            minted-at: stacks-block-height
         })
         
         ;; Update user reputation NFT count with validated data
@@ -315,7 +516,7 @@
             owner: recipient,
             reputation-level: reputation-level,
             quest-count: quest-count,
-            minted-at: burn-block-height
+            minted-at: stacks-block-height
         })
         
         ;; Update user reputation NFT count with validated data
@@ -330,7 +531,7 @@
     )
 )
 
-;; Quest Management
+;; Enhanced Quest Management
 (define-public (cancel-quest (quest-id uint))
     (begin
         ;; Validate inputs first
@@ -344,6 +545,7 @@
                 (description (get description quest))
                 (reward-amount (get reward-amount quest))
                 (reward-token (get reward-token quest))
+                (token-type (get token-type quest))
                 (deadline (get deadline quest))
                 (max-submissions (get max-submissions quest))
                 (current-submissions (get current-submissions quest))
@@ -354,9 +556,12 @@
                 (asserts! (is-eq tx-sender creator) err-unauthorized)
                 (asserts! (is-eq status "active") err-invalid-status)
                 
-                ;; Get locked rewards
+                ;; Get locked rewards and refund based on token type
                 (match (map-get? quest-rewards quest-id)
-                    locked-rewards (begin
+                    reward-info (let (
+                        (locked-amount (get total-locked reward-info))
+                        (reward-token-type (get token-type reward-info))
+                    )
                         ;; Update quest status
                         (map-set quests quest-id {
                             creator: creator,
@@ -364,6 +569,7 @@
                             description: description,
                             reward-amount: reward-amount,
                             reward-token: reward-token,
+                            token-type: token-type,
                             deadline: deadline,
                             max-submissions: max-submissions,
                             current-submissions: current-submissions,
@@ -371,10 +577,57 @@
                             verification-required: verification-required
                         })
                         
-                        ;; Refund locked rewards
-                        (try! (as-contract (stx-transfer? locked-rewards tx-sender creator)))
+                        ;; Refund STX rewards only (SIP-010 refunds need manual handling)
+                        (if (is-eq reward-token-type token-type-stx)
+                            (try! (as-contract (stx-transfer? locked-amount tx-sender creator)))
+                            true ;; SIP-010 refunds would need to be handled separately
+                        )
                         
                         (ok true)
+                    )
+                    err-not-found
+                )
+            )
+            err-not-found
+        )
+    )
+)
+
+;; Separate function for cancelling SIP-010 token quests with refund
+(define-public (cancel-sip010-quest-with-refund 
+    (quest-id uint)
+    (token-contract <sip010-token>))
+    (begin
+        ;; Validate inputs first
+        (asserts! (> quest-id u0) err-invalid-params)
+        
+        ;; Get quest and extract all fields immediately
+        (match (map-get? quests quest-id)
+            quest (let (
+                (creator (get creator quest))
+                (token-principal (contract-of token-contract))
+            )
+                ;; Validate authorization and status
+                (asserts! (is-eq tx-sender creator) err-unauthorized)
+                (asserts! (is-eq (get status quest) "active") err-invalid-status)
+                
+                ;; Get locked rewards
+                (match (map-get? quest-rewards quest-id)
+                    reward-info (let (
+                        (locked-amount (get total-locked reward-info))
+                        (reward-token-contract (get token-contract reward-info))
+                    )
+                        ;; Validate token contract matches
+                        (asserts! (is-eq token-principal reward-token-contract) err-invalid-params)
+                        
+                        ;; Update quest status to cancelled
+                        (map-set quests quest-id 
+                            (merge quest {status: "cancelled"}))
+                        
+                        ;; Refund SIP-010 tokens
+                        (as-contract 
+                            (contract-call? token-contract transfer locked-amount tx-sender creator none)
+                        )
                     )
                     err-not-found
                 )
@@ -387,6 +640,19 @@
 ;; Read-only functions
 (define-read-only (get-quest (quest-id uint))
     (map-get? quests quest-id)
+)
+
+(define-read-only (get-quest-with-reward-info (quest-id uint))
+    (match (map-get? quests quest-id)
+        quest (match (map-get? quest-rewards quest-id)
+            reward-info (ok {
+                quest: quest,
+                reward-info: reward-info
+            })
+            err-not-found
+        )
+        err-not-found
+    )
 )
 
 (define-read-only (get-submission (submission-id uint))
@@ -411,4 +677,15 @@
 
 (define-read-only (get-submission-count)
     (var-get submission-counter)
+)
+
+(define-read-only (get-supported-token (token-contract principal))
+    (map-get? supported-tokens token-contract)
+)
+
+(define-read-only (is-token-enabled (token-contract principal))
+    (match (map-get? supported-tokens token-contract)
+        token-info (get enabled token-info)
+        false
+    )
 )
