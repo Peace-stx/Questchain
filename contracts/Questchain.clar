@@ -1,6 +1,6 @@
 ;; Questchain - Gamified Bounties & Task System for Communities
 ;; A smart contract-powered quest board for incentivizing community contributions
-;; Version 2.0 - Multi-Token Reward Support
+;; Version 2.1 - Categories & Tags System
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -14,6 +14,8 @@
 (define-constant err-invalid-status (err u107))
 (define-constant err-unsupported-token (err u108))
 (define-constant err-token-transfer-failed (err u109))
+(define-constant err-category-not-found (err u110))
+(define-constant err-invalid-tags (err u111))
 
 ;; Token type constants
 (define-constant token-type-stx "STX")
@@ -23,6 +25,43 @@
 (define-data-var quest-counter uint u0)
 (define-data-var submission-counter uint u0)
 (define-data-var reputation-token-counter uint u0)
+(define-data-var category-counter uint u0)
+
+;; Categories and Tags Maps
+(define-map quest-categories
+    uint ;; category-id
+    {
+        name: (string-ascii 50),
+        description: (string-ascii 200),
+        enabled: bool,
+        created-by: principal,
+        quest-count: uint
+    }
+)
+
+(define-map category-name-to-id
+    (string-ascii 50) ;; category name
+    uint ;; category-id
+)
+
+(define-map quest-tags
+    uint ;; quest-id
+    {
+        category-id: uint,
+        tags: (list 5 (string-ascii 30)),
+        difficulty: (string-ascii 20) ;; "beginner", "intermediate", "advanced", "expert"
+    }
+)
+
+(define-map category-quests
+    {category-id: uint, quest-id: uint}
+    bool ;; exists flag
+)
+
+(define-map tag-quests
+    {tag: (string-ascii 30), quest-id: uint}
+    bool ;; exists flag
+)
 
 ;; Supported token contracts - stores trait references
 (define-map supported-tokens 
@@ -112,6 +151,141 @@
     )
 )
 
+;; Category Management Functions
+(define-public (create-category 
+    (name (string-ascii 50))
+    (description (string-ascii 200)))
+    (let 
+        (
+            (category-id (+ (var-get category-counter) u1))
+            (name-length (len name))
+            (desc-length (len description))
+        )
+        ;; Validate inputs
+        (asserts! (> name-length u0) err-invalid-params)
+        (asserts! (<= name-length u50) err-invalid-params)
+        (asserts! (> desc-length u0) err-invalid-params)
+        (asserts! (<= desc-length u200) err-invalid-params)
+        (asserts! (is-none (map-get? category-name-to-id name)) err-invalid-params)
+        
+        ;; Create category
+        (map-set quest-categories category-id {
+            name: name,
+            description: description,
+            enabled: true,
+            created-by: tx-sender,
+            quest-count: u0
+        })
+        
+        (map-set category-name-to-id name category-id)
+        (var-set category-counter category-id)
+        (ok category-id)
+    )
+)
+
+(define-public (toggle-category (category-id uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> category-id u0) err-invalid-params)
+        
+        (match (map-get? quest-categories category-id)
+            category (begin
+                (map-set quest-categories category-id 
+                    (merge category {enabled: (not (get enabled category))}))
+                (ok true)
+            )
+            err-category-not-found
+        )
+    )
+)
+
+;; Helper Functions
+(define-private (is-token-supported (token-contract principal))
+    (match (map-get? supported-tokens token-contract)
+        token-info (get enabled token-info)
+        false
+    )
+)
+
+(define-private (is-category-valid (category-id uint))
+    (match (map-get? quest-categories category-id)
+        category (get enabled category)
+        false
+    )
+)
+
+(define-private (validate-tags (tags (list 5 (string-ascii 30))))
+    (fold validate-single-tag tags true)
+)
+
+(define-private (validate-single-tag (tag (string-ascii 30)) (acc bool))
+    (and acc 
+         (> (len tag) u0)
+         (<= (len tag) u30))
+)
+
+(define-private (validate-difficulty (difficulty (string-ascii 20)))
+    (or 
+        (is-eq difficulty "beginner")
+        (is-eq difficulty "intermediate") 
+        (is-eq difficulty "advanced")
+        (is-eq difficulty "expert")
+    )
+)
+
+(define-private (validate-quest-params 
+    (title (string-ascii 100))
+    (description (string-ascii 500))
+    (reward-amount uint)
+    (deadline uint)
+    (max-submissions uint))
+    (let ((current-block stacks-block-height))
+        (and
+            (> (len title) u0)
+            (> (len description) u0)
+            (> reward-amount u0)
+            (> deadline current-block)
+            (> max-submissions u0)
+            (<= max-submissions u50) ;; reasonable limit
+        )
+    )
+)
+
+(define-private (increment-category-quest-count (category-id uint))
+    (match (map-get? quest-categories category-id)
+        category (begin
+            (map-set quest-categories category-id 
+                (merge category {quest-count: (+ (get quest-count category) u1)}))
+            true
+        )
+        false
+    )
+)
+
+(define-private (add-quest-to-indexes 
+    (quest-id uint)
+    (category-id uint)
+    (tags (list 5 (string-ascii 30))))
+    (begin
+        ;; Add to category index
+        (map-set category-quests {category-id: category-id, quest-id: quest-id} true)
+        
+        ;; Add to tag indexes
+        (fold add-tag-index tags quest-id)
+        true
+    )
+)
+
+(define-private (add-tag-index (tag (string-ascii 30)) (quest-id uint))
+    (begin
+        (if (> (len tag) u0)
+            (map-set tag-quests {tag: tag, quest-id: quest-id} true)
+            false
+        )
+        quest-id
+    )
+)
+
 ;; Admin Functions for Token Management
 (define-public (add-supported-token 
     (token-contract principal)
@@ -151,33 +325,134 @@
     )
 )
 
-;; Helper Functions
-(define-private (is-token-supported (token-contract principal))
-    (match (map-get? supported-tokens token-contract)
-        token-info (get enabled token-info)
-        false
-    )
-)
+;; Enhanced Quest Management Functions
 
-(define-private (validate-quest-params 
+;; Create quest with STX rewards and categories/tags
+(define-public (create-stx-quest-with-tags
     (title (string-ascii 100))
     (description (string-ascii 500))
     (reward-amount uint)
     (deadline uint)
-    (max-submissions uint))
-    (let ((current-block stacks-block-height))
-        (and
-            (> (len title) u0)
-            (> (len description) u0)
-            (> reward-amount u0)
-            (> deadline current-block)
-            (> max-submissions u0)
-            (<= max-submissions u50) ;; reasonable limit
+    (max-submissions uint)
+    (verification-required bool)
+    (category-id uint)
+    (tags (list 5 (string-ascii 30)))
+    (difficulty (string-ascii 20)))
+    (let 
+        (
+            (quest-id (+ (var-get quest-counter) u1))
+            (current-block stacks-block-height)
         )
+        ;; Validate inputs
+        (asserts! (validate-quest-params title description reward-amount deadline max-submissions) err-invalid-params)
+        (asserts! (is-category-valid category-id) err-category-not-found)
+        (asserts! (validate-tags tags) err-invalid-tags)
+        (asserts! (validate-difficulty difficulty) err-invalid-params)
+        
+        ;; Lock STX rewards
+        (try! (stx-transfer? reward-amount tx-sender (as-contract tx-sender)))
+        
+        ;; Create quest
+        (map-set quests quest-id {
+            creator: tx-sender,
+            title: title,
+            description: description,
+            reward-amount: reward-amount,
+            reward-token: tx-sender,
+            token-type: token-type-stx,
+            deadline: deadline,
+            max-submissions: max-submissions,
+            current-submissions: u0,
+            status: "active",
+            verification-required: verification-required
+        })
+        
+        (map-set quest-rewards quest-id {
+            total-locked: reward-amount,
+            token-contract: tx-sender,
+            token-type: token-type-stx
+        })
+        
+        ;; Add tags and category info
+        (map-set quest-tags quest-id {
+            category-id: category-id,
+            tags: tags,
+            difficulty: difficulty
+        })
+        
+        ;; Update indexes
+        (increment-category-quest-count category-id)
+        (add-quest-to-indexes quest-id category-id tags)
+        
+        (var-set quest-counter quest-id)
+        (ok quest-id)
     )
 )
 
-;; Enhanced Quest Management Functions
+;; Create quest with SIP-010 token rewards and categories/tags
+(define-public (create-token-quest-with-tags
+    (title (string-ascii 100))
+    (description (string-ascii 500))
+    (reward-amount uint)
+    (deadline uint)
+    (max-submissions uint)
+    (verification-required bool)
+    (token-contract <sip010-token>)
+    (category-id uint)
+    (tags (list 5 (string-ascii 30)))
+    (difficulty (string-ascii 20)))
+    (let 
+        (
+            (quest-id (+ (var-get quest-counter) u1))
+            (current-block stacks-block-height)
+            (token-principal (contract-of token-contract))
+        )
+        ;; Validate inputs
+        (asserts! (validate-quest-params title description reward-amount deadline max-submissions) err-invalid-params)
+        (asserts! (is-token-supported token-principal) err-unsupported-token)
+        (asserts! (is-category-valid category-id) err-category-not-found)
+        (asserts! (validate-tags tags) err-invalid-tags)
+        (asserts! (validate-difficulty difficulty) err-invalid-params)
+        
+        ;; Lock token rewards by transferring to contract
+        (try! (contract-call? token-contract transfer reward-amount tx-sender (as-contract tx-sender) none))
+        
+        ;; Create quest
+        (map-set quests quest-id {
+            creator: tx-sender,
+            title: title,
+            description: description,
+            reward-amount: reward-amount,
+            reward-token: token-principal,
+            token-type: token-type-sip010,
+            deadline: deadline,
+            max-submissions: max-submissions,
+            current-submissions: u0,
+            status: "active",
+            verification-required: verification-required
+        })
+        
+        (map-set quest-rewards quest-id {
+            total-locked: reward-amount,
+            token-contract: token-principal,
+            token-type: token-type-sip010
+        })
+        
+        ;; Add tags and category info
+        (map-set quest-tags quest-id {
+            category-id: category-id,
+            tags: tags,
+            difficulty: difficulty
+        })
+        
+        ;; Update indexes
+        (increment-category-quest-count category-id)
+        (add-quest-to-indexes quest-id category-id tags)
+        
+        (var-set quest-counter quest-id)
+        (ok quest-id)
+    )
+)
 
 ;; Create quest with STX rewards
 (define-public (create-stx-quest 
@@ -655,6 +930,39 @@
     )
 )
 
+(define-read-only (get-quest-with-tags (quest-id uint))
+    (match (map-get? quests quest-id)
+        quest (ok {
+            quest: quest,
+            tags: (map-get? quest-tags quest-id)
+        })
+        err-not-found
+    )
+)
+
+(define-read-only (get-category (category-id uint))
+    (map-get? quest-categories category-id)
+)
+
+(define-read-only (get-category-by-name (name (string-ascii 50)))
+    (match (map-get? category-name-to-id name)
+        category-id (map-get? quest-categories category-id)
+        none
+    )
+)
+
+(define-read-only (get-quest-tags (quest-id uint))
+    (map-get? quest-tags quest-id)
+)
+
+(define-read-only (is-quest-in-category (quest-id uint) (category-id uint))
+    (is-some (map-get? category-quests {category-id: category-id, quest-id: quest-id}))
+)
+
+(define-read-only (is-quest-tagged (quest-id uint) (tag (string-ascii 30)))
+    (is-some (map-get? tag-quests {tag: tag, quest-id: quest-id}))
+)
+
 (define-read-only (get-submission (submission-id uint))
     (map-get? submissions submission-id)
 )
@@ -677,6 +985,10 @@
 
 (define-read-only (get-submission-count)
     (var-get submission-counter)
+)
+
+(define-read-only (get-category-count)
+    (var-get category-counter)
 )
 
 (define-read-only (get-supported-token (token-contract principal))

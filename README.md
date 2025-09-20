@@ -1,10 +1,10 @@
 # Questchain
 
-A gamified bounties and task system for communities built on Stacks blockchain, enabling smart contract-powered quest boards to incentivize contributions with multi-token reward support.
+A gamified bounties and task system for communities built on Stacks blockchain, enabling smart contract-powered quest boards to incentivize contributions with multi-token reward support and advanced categorization.
 
 ## Overview
 
-Questchain allows communities to create bounty-based tasks (quests) with automated reward distribution and reputation tracking through NFTs. Contributors can submit work, get verified, and earn both STX/SIP-010 token rewards and reputation NFTs.
+Questchain allows communities to create bounty-based tasks (quests) with automated reward distribution and reputation tracking through NFTs. Contributors can submit work, get verified, and earn both STX/SIP-010 token rewards and reputation NFTs. The system now includes comprehensive categorization and tagging for better quest organization and discovery.
 
 ## Features
 
@@ -15,6 +15,13 @@ Questchain allows communities to create bounty-based tasks (quests) with automat
 * **Reputation NFTs**: Milestone-based NFT rewards for active contributors (every 5 completed quests)
 * **Comprehensive Management**: Quest approval, rejection, and cancellation with proper refund mechanisms
 
+### Categories & Tags System (New in v2.1)
+* **Quest Categories**: Organized quest types with dedicated category management
+* **Tag System**: Up to 5 custom tags per quest for detailed classification
+* **Difficulty Levels**: Four-tier difficulty system (beginner, intermediate, advanced, expert)
+* **Advanced Filtering**: Query quests by category, tags, or difficulty level
+* **Category Analytics**: Track quest counts and activity per category
+
 ### Multi-Token Support
 * **STX Quests**: Fully automated creation, distribution, and cancellation
 * **SIP-010 Token Quests**: Support for any SIP-010 compliant token with trait-based implementation
@@ -23,7 +30,16 @@ Questchain allows communities to create bounty-based tasks (quests) with automat
 
 ## Smart Contract Functions
 
-### Quest Management
+### Category Management
+* **`create-category`**: Create new quest categories with name and description
+* **`toggle-category`**: Enable/disable categories (admin only)
+* **`get-category`**: Retrieve category details by ID
+* **`get-category-by-name`**: Find category by name
+* **`get-category-count`**: Get total number of categories
+
+### Enhanced Quest Management
+* **`create-stx-quest-with-tags`**: Create STX quests with categories, tags, and difficulty
+* **`create-token-quest-with-tags`**: Create SIP-010 token quests with full categorization
 * **`create-stx-quest`**: Create STX-based bounty tasks (fully automated)
 * **`create-token-quest`**: Create SIP-010 token-based quests
 * **`create-quest`**: Backward-compatible STX quest creation
@@ -31,6 +47,12 @@ Questchain allows communities to create bounty-based tasks (quests) with automat
 * **`approve-submission`/`reject-submission`**: Verify submitted work
 * **`cancel-quest`**: Cancel STX quests with automatic refunds
 * **`cancel-sip010-quest-with-refund`**: Cancel token quests with manual refund handling
+
+### Quest Discovery & Filtering
+* **`get-quest-with-tags`**: Retrieve quest with all tag information
+* **`get-quest-tags`**: Get tags, category, and difficulty for a quest
+* **`is-quest-in-category`**: Check if quest belongs to specific category
+* **`is-quest-tagged`**: Check if quest has specific tag
 
 ### Token & Reward Management
 * **`add-supported-token`**: Add new SIP-010 tokens to supported list (admin only)
@@ -59,16 +81,34 @@ Questchain allows communities to create bounty-based tasks (quests) with automat
 
 ## Usage Examples
 
-### STX Quest (Fully Automated)
+### Creating Categories
 ```clarity
-;; Create an STX quest
-(contract-call? .questchain create-stx-quest 
+;; Create development category
+(contract-call? .questchain create-category 
+    "Development"
+    "Smart contracts, web development, and technical implementations"
+)
+
+;; Create design category
+(contract-call? .questchain create-category 
+    "Design"
+    "UI/UX design, graphics, and visual content creation"
+)
+```
+
+### STX Quest with Categories & Tags
+```clarity
+;; Create a categorized STX quest
+(contract-call? .questchain create-stx-quest-with-tags
     "Build DeFi Interface"
-    "Create UI for token swapping functionality"
+    "Create responsive UI for token swapping with modern design principles"
     u1000000  ;; 1 STX reward
     u1000     ;; Deadline in blocks
     u3        ;; Max 3 submissions
     true      ;; Verification required
+    u1        ;; Development category
+    (list "frontend" "defi" "react" "typescript" "")  ;; Tags (up to 5)
+    "intermediate"  ;; Difficulty level
 )
 
 ;; Submit work
@@ -76,44 +116,48 @@ Questchain allows communities to create bounty-based tasks (quests) with automat
     u1
     "Completed DeFi interface with swap functionality - GitHub: repo-link"
 )
-
-;; Approval automatically distributes STX rewards
 ```
 
-### SIP-010 Token Quest
+### SIP-010 Token Quest with Full Categorization
 ```clarity
-;; First, admin adds token support
-(contract-call? .questchain add-supported-token 
-    'SP123...token-contract
-    "My Token"
-    "MTK"
-    u6  ;; 6 decimals
-)
-
-;; Create a token quest
-(contract-call? .questchain create-token-quest 
-    "Design Community Logo"
-    "Create brand identity for the community"
-    u100000000  ;; 100 tokens (with 6 decimals)
+;; Create a design quest with tokens
+(contract-call? .questchain create-token-quest-with-tags
+    "Community Brand Identity"
+    "Design complete brand package including logo, colors, and style guide"
+    u500000000  ;; 500 tokens (with 6 decimals)
     u2000       ;; Deadline
     u5          ;; Max submissions
     true        ;; Verification required
     .my-token   ;; Token contract trait
-)
-
-;; Submit and approve work
-(contract-call? .questchain submit-to-quest u1 "Logo designs completed - link")
-(contract-call? .questchain approve-submission u1)
-
-;; Manually distribute token rewards
-(contract-call? .questchain distribute-sip010-reward-with-trait 
-    u1 
-    'SP456...recipient 
-    .my-token
+    u2          ;; Design category
+    (list "branding" "logo" "identity" "graphics" "")  ;; Tags
+    "advanced"  ;; Difficulty level
 )
 ```
 
+### Quest Discovery
+```clarity
+;; Get quest with all categorization info
+(contract-call? .questchain get-quest-with-tags u1)
+
+;; Check if quest is in specific category
+(contract-call? .questchain is-quest-in-category u1 u1)
+
+;; Check if quest has specific tag
+(contract-call? .questchain is-quest-tagged u1 "frontend")
+
+;; Get category details
+(contract-call? .questchain get-category u1)
+```
+
 ## Architecture
+
+### Categories & Tags System
+- **Categories**: Hierarchical organization with unique names and descriptions
+- **Tags**: Flexible labeling system with up to 5 tags per quest
+- **Difficulty Levels**: Standardized four-tier system for skill assessment
+- **Indexing**: Efficient lookup tables for category and tag-based filtering
+- **Validation**: Comprehensive input validation for all categorization data
 
 ### Token Type Handling
 - **STX Quests**: Fully automated workflow from creation to reward distribution
@@ -128,25 +172,26 @@ Questchain allows communities to create bounty-based tasks (quests) with automat
 
 ## Future Development
 
-This implementation provides a robust foundation for a comprehensive quest-based community incentive system with multi-token support, built-in reputation tracking, and automated reward distribution.
+This implementation provides a robust foundation for a comprehensive quest-based community incentive system with multi-token support, built-in reputation tracking, automated reward distribution, and advanced categorization capabilities.
 
 ### Planned Upgrade Features
 
-1. ~~**Multi-Token Rewards**: Fully automated SIP-010 token distribution~~
-2. **Quest Categories & Tags**: Categorization system with filtering capabilities
-3. **Team Quests**: Multi-contributor quests with reward splitting mechanisms
-4. **Time-Locked Rewards**: Vesting schedules for large quest rewards
-5. **Quest Templates**: Pre-built templates for common community tasks
-6. **Skill-Based Matching**: Match contributors based on reputation specializations
-7. **Quest Dependencies**: Chain quests with prerequisite requirements
-8. **Community Voting**: Decentralized verification through voting mechanisms
-9. **Achievement Badges**: Specialized NFT badges for contribution types
-10. **Cross-Community Quests**: Multi-community collaborations with shared pools
+1. ✅ **Quest Categories & Tags**: Categorization system with filtering capabilities
+2. **Team Quests**: Multi-contributor quests with reward splitting mechanisms
+3. **Time-Locked Rewards**: Vesting schedules for large quest rewards
+4. **Quest Templates**: Pre-built templates for common community tasks
+5. **Skill-Based Matching**: Match contributors based on reputation specializations
+6. **Quest Dependencies**: Chain quests with prerequisite requirements
+7. **Community Voting**: Decentralized verification through voting mechanisms
+8. **Achievement Badges**: Specialized NFT badges for contribution types
+9. **Cross-Category Analytics**: Advanced metrics and reporting dashboards
+10. **Quest Series**: Multi-part quest campaigns with progressive rewards
 
 ## Version
 
-**Current Version**: 2.0 - Multi-Token Reward Support
+**Current Version**: 2.1 - Categories & Tags System
 
-## License
-
-This project is open-source and available under the MIT License.
+### Changelog
+- **v2.1**: Added comprehensive categories and tags system with difficulty levels
+- **v2.0**: Multi-token reward support with SIP-010 integration
+- **v1.0**: Initial release with STX rewards and reputation system
